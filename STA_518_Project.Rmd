@@ -1,0 +1,1016 @@
+---
+title: "STA_518_Project"
+author: "Henry Ngunjiri"
+date: "18/03/2023"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r message=FALSE}
+#importing libraries
+
+library(data.table)
+library(skimr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(plotly)
+```
+
+
+# Data Cleaning
+
+## Analysis of Census Population Data from 2008-2021
+The `fread()` function reads large csv files blazingly fast when compared to other functions such as the base `read.csv()` function. We will use it to import the census data from the American Community Survey.
+```{r}
+#read the data from a csv file
+census <- fread("https://raw.githubusercontent.com/dilernia/STA418-518/main/Data/census_data_2008-2021.csv")
+census %>% head(3)
+```
+
+
+The data frame contains both state-level and county-level data combined together.Let's separate county and state data from the onset so that we don't get redundant or incorrect computations. For the sake of our analysis we will also shift DC & Puerto Rico to the states category. First we will need to remove one entry of DC per year because it appears twice.
+
+```{r}
+#print all instances with District of Columbia
+census %>% 
+  filter(str_detect(county_state,pattern="District of Columbia")) %>%
+  head
+```
+```{r}
+#remove duplicated instances of Dc
+census<-census %>% 
+  filter(!str_detect(county_state,pattern="^District of Columbia, District of Columbia$"))
+```
+
+To separate the data, we use the `str_detect()` function with a **regular expression** to match all states. We also rename the column `county_state` to `state`.
+```{r}
+#Separate state data from census data
+state_census <- census %>% 
+  filter(str_detect(county_state,pattern="^([A-Z][a-z]*\\s?)+$|District of Columbia")) %>% 
+  rename(state=county_state)
+  state_census 
+```
+
+
+
+The `anti_join` function helps us to separate county and state data. We also rename the `county_state` column to `county` because we have filtered the states out.
+```{r}
+#separate county data from census data
+county_census <- census %>% 
+  anti_join(state_census,by=c("county_state"="state","year")) %>% 
+  rename(county=county_state)
+county_census %>% head
+```
+
+Next, we create a new column `state` with the corresponding US state.
+
+```{r}
+#create new column for states
+regex<-str_match(county_census$county,pattern="(.+)(,\\s)(.*)")[,]
+
+county_census<-county_census %>% 
+  mutate(county=as.factor(regex[,2]),state=as.factor(regex[,4]),.after=county)
+
+county_census %>% head(3)
+
+```
+There are also parishes, boroughs and municipals in the data.
+```{r}
+#print all regions that do not end with County
+county_census %>% 
+  filter(!str_detect(county,pattern = ".+\\sCounty")) %>% 
+  head
+```
+# Explanatory Data Analaysis
+
+## Tables of Summary Statistics
+
+The number of counties has grown from 801 to 840.
+```{r}
+#get year with most and least counties in county_census data
+county_census %>%
+  group_by(year) %>%
+  summarize(counts=n()) %>%
+  filter(counts %in% c(max(counts),min(counts)))
+```
+A net of 48 counties are there in 2021 that are missing in the year 2008.
+```{r}
+#find counties in 2021 but not in 2008 data
+county_census %>% 
+  filter(year==2021) %>%
+  anti_join(filter(county_census,year==2008),by=c('county','state'))
+```
+
+
+
+The `prop_female` and `prop_male` columns can give useful information on gender breakdown in counties across the years such counties with more females than males.
+
+```{r}
+#find which counties have a more population of either gender
+gender_prop <- county_census %>%
+  mutate(gender_demographic=ifelse(prop_female>prop_male,"more_female_county","more_male_county")) %>% 
+  select(year,gender_demographic) %>% table
+gender_prop
+```
+More than 4:1 counties had more female in 2008 but this has dropped to slightly over 2:1 in 2021. This may be due to the updates from the real 2020 census data which was used to make estimates in 2021 which could also imply years prior to 2020 underestimated counties with more males.
+```{r}
+#turn into tibble and find female:male ratio
+gender_prop %>% 
+  as_tibble() %>%
+  pivot_wider(names_from = gender_demographic, values_from = n) %>% 
+  mutate(total_counties=more_female_county+more_male_county,
+         f_to_m_ratio=more_female_county/more_male_county)
+```
+
+We can also do the same for racial groups.
+
+```{r}
+#find number of counties with most populous ethnic groups for each county
+race_by_county<- county_census %>% 
+  rowwise() %>% 
+  mutate(max_race_prop=
+           max(prop_white,prop_black,prop_native,prop_asian,
+               prop_hawaiin_islander,prop_other_race,prop_multi_racial)) %>%  
+  ungroup() %>% 
+  mutate(
+  racial_demographic = case_when(
+    !is.na(prop_white) & max_race_prop==prop_white  ~ "more_whites",
+    !is.na(prop_black) & max_race_prop==prop_black  ~ "more_blacks",
+    !is.na(prop_native) & max_race_prop==prop_native  ~ "more_natives",
+    !is.na(prop_asian) & max_race_prop==prop_asian  ~ "more_asians",
+    !is.na(prop_hawaiin_islander) & max_race_prop==prop_hawaiin_islander  ~ "more_hawaiin_islander",
+    !is.na(prop_other_race) & max_race_prop==prop_other_race  ~ "more_other_race",
+    !is.na(prop_multi_racial) & max_race_prop==prop_multi_racial  ~ "more_multi_racial",
+    is.na(max_race_prop) ~ "no_race_data")
+) %>% 
+  select(year,racial_demographic)
+
+race_by_county %>% table
+```
+
+```{r}
+#turn into tibble
+race_by_county %>% 
+  table %>% 
+  as_tibble() %>% 
+  pivot_wider(names_from = racial_demographic, values_from = n) %>% 
+  mutate(total_counties=rowSums(select(.,more_asians:no_race_data)))
+```
+
+We can also see how many counties whites are less than 50% over the years.
+```{r}
+#number of counties where whites are less than 50%
+county_census %>%
+  filter(prop_white<.5) %>%
+  group_by(year) %>%
+  count()
+```
+2010 had the lowest average median income while 2021 had the highest.
+```{r}
+#average median income
+county_census %>% group_by(year) %>% 
+  summarise(average_median_income=mean(median_income),sd_median_income=sd(median_income)) %>% 
+  arrange(average_median_income)
+```
+
+Another important metric is the median population because the median is not sensitive to outliers unlike the mean.
+
+```{r}
+county_census %>%
+  group_by(year) %>%
+  summarise(median_population=median(population))
+```
+
+
+## Data Visualizations
+Median income is negatively correlated with the proportion of poverty but highly correlated with monthly home cost and monthly rent cost.
+```{r}
+#correlation of continuous variables
+ plot_ly(
+    x = colnames(county_census[,-c(1:3)]), y = colnames(county_census[,-c(1:3)]),
+    z = cor(county_census[,-c(1:3)],use="complete.obs"), type = "heatmap"
+)
+```
+
+### Analyzing Housing Costs
+
+There two types of housing costs, `median_monthly_rent_cost` and `median_monthly_home_cost`. The `pivot_longer` function can help creating a column for each housing cost.
+```{r}
+#pivot housing costs
+county_housing_df <- county_census %>% 
+  rename(rent=median_monthly_rent_cost,home=median_monthly_home_cost) %>% 
+  pivot_longer(cols=c('rent','home'),names_to = "median_monthly_cost_type",values_to = "cost") %>% 
+  select(county:median_income,median_monthly_cost_type,cost,everything())
+county_housing_df %>% head
+```
+
+The average median housing cost in the US has been increasing steadily. The gap between home cost and rent cost has narrowed significantly from 2008 to 2021.
+
+```{r message=FALSE, fig.width=10}
+#plot the average median housing cost
+county_housing_df %>%
+  group_by(year,median_monthly_cost_type) %>%
+  summarize(avg_housing_cost=mean(cost)) %>% 
+  ggplot(aes(x=year,y=avg_housing_cost,color=median_monthly_cost_type))+
+  geom_point()+
+  geom_line()+
+  scale_x_continuous(breaks = 2008:2021)+
+    labs(
+    x="year",
+    y="Population Total",
+    title="Line Graph Showing Population Growth Estimates from 2008-2021",
+    caption="Source: United States American Community Survey (ACS)"
+  )+
+  theme_bw()
+
+  
+```
+A scatter plot can show the relationship between the two housing costs.Most points lie above the *y=x* line meaning median home costs are typically more than median rent costs.
+```{r fig.width=10}
+
+#scatter plot between median rent cost and median home cost
+county_census %>% 
+  ggplot(aes(x=median_monthly_rent_cost,y=median_monthly_home_cost)) + 
+  geom_point(aes(color=as.factor(year)))+
+  geom_abline(slope=1,intercept=0)+
+  labs(
+    x='rent',
+    y='home',
+    color="Year"
+  )
+```
+Next we plot a boxplot of the top five states with the highest average median housing costs together with the bottom five states. It appears Puerto Rico is the cheapest followed closely by Alabama and Arkansas. California and New Jersey have one of the most expensive costs. Housing costs in Vermont have a very small range in terms of pricing.
+```{r fig.width=10}
+
+#box plot of states with highest and lowest average median house costs in 2021.
+county_housing_df %>% 
+  filter(year==2021) %>% 
+  group_by(state) %>% 
+  summarize(avg_median_cost=mean(cost)) %>% 
+  filter(rank(avg_median_cost)<=5 | rank(avg_median_cost)>nrow(.)-5) %>% 
+  inner_join(filter(county_housing_df,year==2021),multiple = "all",by=c("state")) %>% 
+  ggplot(aes(x=state,y=cost,fill=median_monthly_cost_type))+
+  labs(
+    title="Top 5 States With Most Expensive/Cheapest Average Median Housing Costs",
+    subtitle = "Boxplot Showing Data from 2021",
+    fill="Cost Type",
+    y="Amount in USD"
+    
+  )+
+  geom_boxplot()+
+  theme(legend.position = "bottom")
+
+
+```
+
+### Analyzing Population Trends
+
+
+The population has been growing steadily by year. Population crossed the 330 million mark in 2018.
+
+```{r}
+#bar graph of population growth over the years
+state_census %>%
+  group_by(year) %>%
+  summarise(total=sum(population)) %>% 
+  ungroup() %>%
+  ggplot()+
+  geom_bar(aes(x=as_factor(year),y=total),stat = "identity") +
+  coord_cartesian(ylim = c(3e+8, 3.4e+8))+
+  scale_y_continuous(labels=scales::comma)+
+  labs(
+    x="year",
+    y="Population Total",
+    title="Bar Graph Showing Population Growth Estimates from 2008-2021",
+    caption="Source: United States American Community Survey (ACS)"
+  )+
+  theme_bw()
+```
+
+The population follows a fairly linear trend. We can fit a regression model and extrapolate to predict the population of future years. 
+```{r}
+#line graph of population trends
+state_census %>%
+  group_by(year) %>%
+  summarise(total=sum(population)) %>% 
+  ggplot(aes(x=year,y=total))+
+  geom_point()+
+  geom_line()+
+  scale_x_continuous(breaks = 2008:2021)+
+  scale_y_continuous(labels=scales::comma)+
+    labs(
+    x="year",
+    y="Population Total",
+    title="Line Graph Showing Population Growth Estimates from 2008-2021",
+    caption="Source: United States American Community Survey (ACS)"
+  )+
+  theme_bw()
+```
+
+Next, we create a mapping between the state names with the corresponding state code. We then add a column for the codes. This is essential especially when you plotting choropleth maps as some libraries need the state codes as arguments to project the various states.
+```{r}
+#creating state codes
+state_names <- c(
+  "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", 
+  "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", 
+  "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", 
+  "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+  "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", 
+  "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", 
+  "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", 
+  "Rhode Island", "South Carolina", "South Dakota", "Tennessee", 
+  "Texas", "Utah", "Vermont", "Virginia", "Washington", 
+  "West Virginia", "Wisconsin", "Wyoming","District of Columbia", "Puerto Rico"
+)
+
+
+state_codes <- c(
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", 
+  "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", 
+  "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", 
+  "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", 
+  "VT", "VA", "WA", "WV", "WI", "WY","DC","PR"
+)
+
+states_code <- setNames(state_codes, state_names)
+```
+```{r}
+#adding state codes to the state_census data
+state_census <- state_census %>% 
+  mutate(code=states_code[state],.after=state)
+state_census %>% head
+```
+
+`plotly` allows us to create interactive maps of any kind. We'll use it to create an interactive map showing the median income across states over the years. The functionality allows you to hover over any state to see it median income for that particular year. The slider below is created by `plot_geo`'s argument `frame` which is used to switch between years.
+```{r}
+#setting font and label options
+fontStyle = list(
+  family="Serif",
+  size=15,
+  color="black"
+)
+label = list(
+  bgcolor="#EEE",
+  bordercolor="transparent",
+  font=fontStyle
+)
+
+library(plotly)
+
+map_df <- state_census %>% 
+  select(state,code,year,median_income) %>%
+  mutate(hover_text=str_c("State: ",code,"\nMedian Income: ",str_c("$",format(median_income, big.mark=","))))
+
+
+# specify text color
+l <- list(color = toRGB("white"), width = 2)
+
+# specifying scope and how water bodies should be displayed
+g <- list(
+  scope = 'usa',
+  projection = list(type = 'albers usa'),
+  showlakes = FALSE,
+  lakecolor = toRGB('white')
+)
+
+#project the map
+median_income_map <- plot_geo(map_df, locationmode="USA-states",frame=~year) %>% 
+  add_trace(locations=~code,
+            z=~median_income,
+            color=~median_income,
+            colorscale="Reds",
+            text = ~hover_text,
+            hoverinfo="text") %>% 
+  layout(geo=list(scope="usa"),
+         font=list(family="Serif"),
+         title="Median Income by State\n2008-2021") %>% 
+  style(hoverlabel=label) %>% 
+  config(displayModeBar=FALSE) %>% 
+  colorbar(title="in USD")
+
+median_income_map
+```
+
+Similarly, we can create a map for the population.
+
+```{r}
+#population map
+map_df <- map_df <- state_census %>% 
+  select(state,code,year,population) %>%
+  mutate(hover_text=str_c("State:",code,"\nPopulation:",format(population, big.mark=",")))
+
+census_map <- plot_geo(map_df, locationmode="USA-states",frame=~year) %>% 
+  add_trace(locations=~code,
+            z=~population,
+            zmin=400,000,
+            zmax=max(map_df$population),
+            color=~population,
+            colorscale="Viridis",
+            text = ~hover_text,
+            hoverinfo="text") %>% 
+  layout(geo=list(scope="usa"),
+         font=list(family="Serif"),
+         title="Population Growth in the US\n2007-2021") %>% 
+  style(hoverlabel=label) %>% 
+  config(displayModeBar=FALSE)
+
+census_map
+```
+All states had their highest median income in 2021 except D.C which recorded it's highest median income in 2019.
+```{r}
+#get maximum median income for each state between 2008-2021
+state_census %>%
+  group_by(state) %>%
+  arrange(state,desc(median_income)) %>%
+  slice_head(n=1) %>% 
+  arrange(year,desc(median_income))
+```
+# Analyizing Counties with the greatest growth
+
+To analyze population growth in counties, we'll need to pivot the data into a wide format consisting of years as columns and population as values. We also add a 2020 column with NA's because there was no data for that year. Thereafter we calculate the population growth from the previous year using a for loop.
+```{r}
+#pivot population data
+pivot_county <-county_census %>%
+select(county,state,year,population) %>%
+pivot_wider(names_from = year, values_from = population) %>% 
+mutate(`2020`=NA,.before=`2021`)
+
+pivot_county %>% head
+```
+```{r}
+#calculate year-on-year growth
+j <- length(pivot_county)
+
+for (i in 4:j){
+  change<-(pivot_county[i]-pivot_county[i-1])/pivot_county[i-1]
+  pivot_county[str_c(colnames(pivot_county[i]),"_growth")] <- round(as_vector(change),digits=3)
+
+}
+pivot_county %>% head(3)
+
+```
+
+
+
+We use the SMA over the years to track population growth. Sumter County, Florida experienced the most growth of an average of 4.5% annually from 2008 to 2021. It grew from a population of 74,721 in 2008 to 135,638 in 2021 representing 81.5% growth. Some counties such as Walton county do not have population data for some years and hence their SMA is exeggerated.
+
+```{r}
+#calculate simple moving average
+pivot_county <- pivot_county %>%
+  mutate(simple_moving_average=
+           round(rowMeans(select(.,ends_with("growth")),na.rm=T),3)) %>% 
+  arrange(desc(simple_moving_average))
+pivot_county %>% head(3)
+
+```
+We can take those with complete population data from 2008-2021 except 2020 because there was no data for all the columns. Counties with top 5 growth are all in Texas and Florida. In contrast Puerto Rico municipals experienced most decrease.
+```{r}
+#top 5 and bottom 5 county-growth
+complete_rows <- pivot_county %>% 
+  select(-c(`2020`,`2020_growth`,`2021_growth`)) %>% 
+  complete.cases()
+
+pivot_county<-pivot_county[complete_rows,] %>% 
+  arrange(desc(simple_moving_average))
+pivot_county %>% 
+slice(c(1:5,(nrow(.)-4):nrow(.)))
+
+```
+Next, we create a line plot of population growth of the top five and bottom five counties.
+```{r fig.width=10, fig.height=7}
+#create line graph of top 5 and bottom 5 counties
+pivot_county %>%
+  slice(c(1:5,(nrow(.)-4):nrow(.))) %>%
+  select(county,state,simple_moving_average) %>% 
+  inner_join(county_census,multiple = "all",by=c("county","state")) %>% 
+  ggplot(aes(x=year,y=population,color=county))+
+  geom_point(aes(shape=simple_moving_average>0))+
+  geom_line()+
+  scale_shape_discrete(labels=c("Outbound Counties","Inbound Counties"))+
+  scale_x_continuous(breaks = 2008:2021)+
+  scale_y_continuous(labels=scales::comma,breaks=seq(50000,900000,by=50000))+
+    labs(
+    x="year",
+    y="Population Total",
+    title="Line Graph of the Top Five and Bottom Five Growing Counties",
+    subtitle="Line Graph Showing Population Growth Estimates from 2008-2021",
+    caption="Source: United States American Community Survey (ACS)",
+    shape="Growth Type"
+  )+
+  theme_bw()
+```
+
+### Education Levels
+
+To get the proportion of each education level in America, we can average the proportions in all states. This is because the sample proportion is an unbiased estimator, and for sufficiently large samples their average tend to the population proportion. If the population proportion $P=\frac{K}{N}$, then for $t$ independent samples drawn from the whole population $$P=\frac{\sum\limits_{i=1}^{t}\left( \frac{k_i}{n_i} \right)}{t}=\frac{\sum\limits_{i=1}^{t}p_i}{t}$$ where $\sum\limits_{i=1}^{t}n_i=N$;    $\hspace{1em}\sum\limits_{i=1}^{t}k_i=K$;$\hspace{1em}p_i=\frac{k_i}{n_i}\hspace{1em}$ for some $t\in\mathbb{Z}$
+
+We can demonstrate this using R:
+```{r}
+values <- c(rep(T,3000),rep(F,7000))
+values <- values[sample(10000)]#shuffle
+
+str_glue("Population proportion: {mean(values)}")
+
+sample_props <- rep(NA,1000)
+
+#independent samples
+for (i in 1:1000)
+  sample_props[i]<-mean(values[((i-1)*10 + 1):(i*10)])
+
+str_glue("Mean of sample proportions: {mean(sample_props)}")
+```
+Averaging proportions of education level at state level will estimate the average proportion of the whole country.
+
+```{r}
+# pie chart showing education level average education level proportions in 2021
+
+labels <-state_census %>% select(prop_highschool:prop_doctoral) %>% colnames
+
+
+values<- state_census %>%
+  filter(year==2021) %>% 
+  select(all_of(labels)) %>%
+  map_dbl(mean)
+
+#difference of summed proportions with 1 is those who have lower than high school
+labels <- c(labels,"prop_lower_than_high_school")
+values <- c(values,1-sum(values))
+
+#pie chart showing education proportions as of 2021
+plot_ly(labels = labels, values = values) %>% 
+  add_pie(hole = 0.4)%>% 
+  layout(title = "Education Level by Proportion in America for the Year 2021",  showlegend = F,
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+```
+A line plot for all the years shows people who have attained bachelors degree has grown and those whose highest level of education is high school or lower has dropped.
+
+```{r, message=FALSE,fig.width=10}
+#line plot of average education proportions
+
+state_census %>% 
+  select(year,prop_highschool:prop_doctoral) %>% 
+  mutate(prop_lower_than_high_school=1-rowSums(select(.,prop_highschool:prop_doctoral))) %>% 
+  pivot_longer(cols=colnames(select(.,prop_highschool:prop_lower_than_high_school)),
+               names_to = "prop_type",values_to = "prop") %>% 
+  group_by(year,prop_type) %>% 
+  summarize(avg=mean(prop)) %>% 
+  ggplot(aes(x=year,y=avg,color=prop_type))+
+  geom_point(aes(shape=prop_type),size=1.5)+
+  scale_shape_manual(values=1:10)+
+  scale_y_continuous(breaks=seq(0,.25,.05),labels=str_c(seq(0,.25,.05)*100,"%"))+
+  geom_line()+
+  labs(title="Average Education Proportions in the US from 2008-2021",
+       y="Percentage",
+       color='Education Level',
+       shape="Education Level")
+```
+
+
+### Merging Datasets
+```{r}
+#reading the gun_violence data
+gun_violence <- fread("gunViolenceFull.csv") %>% as_tibble()
+gun_violence %>% head(3)
+
+#variable selection
+gun_violence<-gun_violence %>% 
+  select(-c(incident_id,address,incident_url,incident_url_fields_missing,congressional_district,
+            gun_stolen,incident_characteristics,lat,location_description,long,notes,sources,
+            state_house_district,state_senate_district))
+
+```
+We will need to merge with the year which we will extract using `lubridate's` function `year()` and create a new column for it. Before that, we will also need to convert the date column to type `date` using the `ymd()` function.
+```{r}
+library(lubridate)
+# adding a year column to the gun-violence data
+
+gun_violence <- gun_violence %>% mutate(date=lubridate::ymd(date))
+gun_violence <- gun_violence %>% mutate(year=lubridate::year(date),.after=date)
+gun_violence %>% head(3)
+```
+The skim function shows there is a compete rate of most columns. This is however, deceptive, as there are columns whose rows have empty strings which are regarded as non-missing. To fix this we can use the `map` functions to convert empty strings to NA.
+```{r}
+#skim the data
+skim(gun_violence)
+```
+```{r}
+#convert empty strings to NA
+char_cols<-gun_violence %>% purrr::map_lgl(is.character)
+
+gun_violence[,char_cols] <- map(
+  gun_violence[,char_cols],\(x){ifelse(str_trim(x)=="",NA,x)}) %>% 
+  as_tibble()
+```
+
+Let's skim one more time to observe the changes. We can see that `participant_relationship` has dropped from a `complete_rate` of 1 to 0.0658.
+
+```{r}
+skim(gun_violence)
+```
+
+
+Merging these two data sets is pretty straightforward at the state level but not so at the county level. This is is because the `city_or_county` column has both cities and counties and uses an unreliable naming convention which does not match that of the census data.
+
+```{r}
+#inner joining columns by state and year
+gun_census_by_state <- gun_violence %>%
+  inner_join(state_census, by = c("year","state"))
+
+gun_census_by_state %>% nrow #all rows merged
+```
+
+We can see that merging using this column joins only a mere 1694 rows from both datasets.
+```{r}
+#merging with year,state and city_or_county
+gun_violence %>%
+  inner_join(county_census, by = c( "year"="year", "state"="state" , "city_or_county"="county")) %>% 
+  nrow # only 1694 rows merged
+```
+
+
+This is not at all useful. To merge more data, we have to be more creative. The `address_full` contains the county and city names in most rows and we can extract them in a format we desire. This is where regexes also come in handy. However, this is still not full proof as the address_full column:
+  * Contains NA in some rows.
+  * Has incorrect county,state pairs.
+
+We can see that 7935 rows in `address_full` are `NA`. 
+```{r}
+#addresses with NA values
+gun_violence %>% filter(is.na(address_full)) %>% nrow
+```
+
+Nevertheless, let's extract the counties and cities using a function with a regex and reassign the tibble with the new column `county`.
+
+```{r}
+#extract county or city information from the address_full column
+get_county_or_city <- function(address,state){
+  if (is.na(address))
+    NA
+  
+  else if(str_detect(address,pattern="County,"))
+    str_match(address,pattern=",?\\s?([A-Za-z\\s\\.\\-ʻ\\'\\(\\)ñ]{2,}\\sCounty)")[,2]
+    
+  else
+    str_trim(str_match(address,str_c("([A-Za-z\\s\\.\\-ʻ\\'\\(\\)]*),\\s?(",state,"),\\s?(\\d{5})?"))[,2])
+  
+}
+
+
+
+gun_violence <- gun_violence %>%
+  mutate(county = map2_chr(address_full,state,get_county_or_city),
+         .after=state) 
+gun_violence %>% head(3)
+```
+
+
+Expectedly, there are NA values in our newly created `county` column because of the missing values in `address_full`. But there are also instances where there is an address but the county still has an NA.
+```{r}
+gun_violence %>%
+  filter(is.na(county) & !is.na(address_full)) %>% 
+  select(state,city_or_county,address_full) %>% 
+  knitr::kable()
+```
+The biggest cause is the mismatch between the state name in the `state` column and `address_full` column.
+
+Merging now, we get 189,010 joins. Much better than 1694 joins.
+```{r}
+#merge by county,state,year
+gun_violence %>%
+  inner_join(county_census,by=c("county","state","year")) %>% 
+  nrow(.)
+```
+If we look closely, we will notice that for cities, the census data contains the suffix city while the `gun_violence` does not except for Portsmouth City and Carlson City.
+```{r}
+gun_violence %>%
+  filter(!str_detect(county,pattern="Parish$|Borough$|Municipality$|City$|County$")) %>%
+  head(10)
+
+gun_violence %>% 
+  filter(str_detect(county,pattern="(?i)city$")) %>% 
+  head(10)
+```
+
+
+We'll replace the word city in the `county_census` dataset to harmonize the names with those in the `gun_violence` dataset.
+```{r}
+#replace string city in county_census dataset
+county_census_cleaned_city <- county_census %>% 
+  mutate(county=case_when(
+    str_detect(county,pattern=
+               "^(?!Portsmouth city|Carlson city).*city$(?i)") ~ str_trim(str_replace(county,"(?i)city$", "")),
+    str_detect(county,pattern="Portsmouth city") ~ "Portsmouth City",
+    TRUE ~ county
+))
+
+```
+
+Merging again, we get 198,091 matches.
+```{r}
+#merge by county,state,year
+gun_violence %>%
+  inner_join(county_census_cleaned_city, by=c("county","state","year")) %>% 
+  nrow
+```
+
+
+
+Let's use an anti-join to see how many rows did not join. There are 41,586. Part of the reason is because of the 7,941 missing fields in the `address_full` column and hence are NA in our `county` column.
+
+```{r}
+#get rows that did not match
+no_match<-gun_violence %>%
+  anti_join(county_census_cleaned_city,by=c("county","state","year")) 
+
+no_match
+```
+
+But also there are non-existent, missing or misclassified counties and parishes in our datasets.
+
+Taking the first county as an example, St. Mary Parish, we find its missing in our census data.
+```{r}
+county_census %>% filter(county=="St. Mary Parish")
+```
+Over 22,000 counties have a county-state mismatch or are missing in the census data.
+```{r}
+no_match %>% 
+  filter(str_detect(county,pattern="(?i)county"))
+```
+For instance the first county in the dataframe, Colquitt County, is missing from the census data.
+```{r}
+county_census %>%
+  filter(county=="Colquitt County")
+```
+If we take the 3rd row which shows Scott county is in Illinois, we'll find that in the census data we only have Scott County for Iowa and Minnesota but not in Illinois
+```{r}
+county_census %>%
+  filter(county=="Scott County") %>%
+  group_by(county,state) %>%
+  summarize()
+```
+
+
+We can do a lot fancy stuff with the dataset, like retrieving the top websites to report gun crime from the `source_url`
+```{r}
+#function to obtain the domain name
+get_domain <- function(url, regex="(?:https?:\\/\\/)?(?:[^@\n]+@)?(?:www\\.)?([^:\\/\\n?]+)"){
+  match <- str_match(url, regex)
+    if(!is.null(match))
+      str_trim(match[[2]])
+    else
+      NA
+}
+
+gun_violence<-gun_violence %>%
+  mutate(domain=map_vec(source_url,get_domain),.after=source_url)
+
+gun_violence %>% head
+
+```
+
+
+
+
+
+```{r fig.width=9}
+#plot top ten websites
+gun_violence %>% 
+  group_by(domain) %>% 
+  summarize(per_year_counts=n()) %>% 
+  arrange(desc(per_year_counts)) %>% 
+  slice_head(n=10) %>%
+  inner_join(gun_violence,by=c("domain"),multiple="all")%>% 
+  ggplot(aes(x=fct_reorder(domain,desc(per_year_counts)),fill=as.factor(year)))+
+  geom_bar()+
+  labs(
+    title="Top Ten Websites To report Gun Crime",
+    subtitle = "Data from 2013-2018",
+    x="Site",
+    y="incidences",
+    caption = "Data Source: Gun Violence Archive",
+    fill="Year"
+  )+
+  theme_bw()+
+  theme(text = element_text(face = "bold"),
+        title = element_text(size=12),
+        axis.text.x=element_text(angle=45,vjust=.6))+
+  scale_fill_brewer(palette = "Dark2")
+  
+```
+It apppears much of the gun violence was reported in 2016 & 2017 by the top 10 websites. Also some websites are subdomains for specific regions like chicago suntimes.
+
+Or find the mean age of participants in each year.
+```{r}
+ages_values<-str_match_all(gun_violence$participant_age,pattern="\\d+::(\\d+)(||)?") %>% 
+  map(\(x){as.numeric(x[,2])})
+
+gun_violence %>% mutate(ages_values) %>% 
+  select(participant_age,ages_values) %>% head(10)
+
+```
+```{r}
+gun_violence %>% mutate(ages_values) %>% 
+  group_by(year) %>% 
+  summarize(participant_mean_age=mean(unlist(ages_values),na.rm = TRUE))
+```
+
+
+
+
+We can also find the number of gun violence murders per year. February typically has the lowest number of deaths before shooting up again in March. Also most shootings spike in July and August before falling again.
+
+```{r fig.width=12, message=FALSE}
+#line plot showing number of people killed due to gun violence per year
+gun_violence %>% 
+  mutate(abb=factor(month.abb[lubridate::month(date)], levels=month.abb)) %>%
+  group_by(abb,year) %>%
+  summarize(killed=sum(n_killed)) %>% 
+  ungroup()%>% 
+  ggplot(aes(x=abb, y=killed,group=1))+
+  geom_line()+
+  geom_point()+
+  facet_wrap(.~year,scales="free")+
+  labs(title="Fatalities per year for gun violence",
+       x="Month",
+       y="Fatalities")
+```
+
+
+## Monte Carlo Methods of Inference
+
+We can randomization to determine whether the population differs by the year using the F-test.
+```{r}
+#F-test to find whether population differs by year
+set.seed(2022)
+myData<-county_census %>% select(year,population)
+# Fitting One-Way ANOVA model
+modFit <- aov(population ~ year, data = myData)
+Fstatistic <- modFit %>% broom::tidy() %>% dplyr::slice_head(n = 1) %>% dplyr::pull(statistic)
+
+# Randomization test: species is the grouping variable and body_mass_g is our response variable
+# For randomization test, we permute the individuals across the groups 
+
+# Getting number of each individuals in each group
+groupCounts <- myData %>% dplyr::count(year)
+
+# Overall sample size
+N <- nrow(myData)
+
+# Number of permutations
+nperms <- 1000
+
+# Instantiating vector for test statistics
+permFs <- vector(length = nperms)
+
+# Create vector of group memberships of individuals
+groups <- rep(groupCounts$year, times = groupCounts$n)
+
+for(p in 1:nperms) {
+# Permute individuals keeping group sizes the same as in original data
+permData <- myData %>% dplyr::mutate(year = groups[sample(1:N, size = N, replace = FALSE)])
+
+# Calculate F test statistic for each permutation
+modFit <- aov(population ~ year, data = permData)
+permFs[p] <- modFit %>% broom::tidy() %>% dplyr::slice_head(n = 1) %>% dplyr::pull(statistic)
+}
+
+
+```
+```{r}
+(permFs>Fstatistic) %>% table
+
+#plot the distribution of F-values
+tibble(x=permFs) %>% ggplot(aes(x=x)) + geom_histogram()
+
+#log-normal transformed histogram using natural log
+tibble(x=permFs) %>% ggplot(aes(x=log(x))) + geom_histogram()
+```
+
+
+
+## Bootstraping 
+
+Supposing we wanted to estimate the interquantile range for the US county population in the year 2021 with only 10% of the data. We can achieve this by doing a non-parametric bootstrap test, which draws samples of size $n$ with replacement multiple times from sample data.
+
+
+```{r}
+#bootstrap to estimate the interquantile range for the population in 2021
+set.seed(2022)
+
+sample_population<- county_census %>% 
+  filter(year==2021) %>% 
+  pull(population) %>% sample(round(.1*length(.)))
+
+B<- 10000
+n<- length(sample_population)
+
+boots<-matrix(NA, nrow=n, ncol=B)
+
+for (b in 1:B){
+  boots[, b] <-sample_population[sample(1:n, size = n, replace = TRUE)]
+}
+bootIR <- rep(NA, B)
+
+for (b in 1:B){
+  bootIR[b] <- quantile(boots[,b],probs = .75) - quantile(boots[,b],probs = .25)
+}
+
+tibble(`Interquantile Range`=bootIR) %>% 
+  ggplot(aes(x=`Interquantile Range`))+
+  geom_histogram(color="white")+
+scale_y_continuous(expand=expansion(mult = c(0,.1)))+
+  labs(y="Frequency",
+      title="Bootstrap distribution of the Interquantile Range")
+```
+
+
+
+```{r}
+bootSE <- sd(bootIR)
+
+bootSE
+
+ciLevel<-.95
+bootLB <- quantile(bootIR,probs=(1-ciLevel)/2)
+bootUB <- quantile(bootIR,probs=1 - ((1-ciLevel)/2))
+bootLB
+bootUB
+```
+We are 95% confident that the Interquantile Range for the US county population in 2021 was between `r format(quantile(bootIR,probs=(1-ciLevel)/2),scientific=F)` and `r format(quantile(bootIR,probs=1 - ((1-ciLevel)/2)),scientific=F)`. The actual interquantile range was `r format(quantile(county_census[year==2021]$population, probs = .75) - quantile(county_census[year==2021]$population,probs = .25),scientific=F)`
+
+
+# Data Dictionary
+
+The data dictionary describes important variables and their types.
+```{r}
+dataDictionary <- tibble(Variable = colnames(census),
+                         Description = c("geographic region",
+                                         "year",
+                                         "population",
+                                         "median income",
+                                         "median monthly rent costs for renters in dollars",
+                                         "median monthly housing costs for homeowners in dollars",
+                                         "proportion of people who are female",
+                                         "proportion of people who are male",
+                                         "proportion of people who are white alone",
+                                         "proportion of people who are black or African American alone",
+                                         "proportion of people who are American Indian and Alaska Native alone",
+                                         "proportion of people who are Asian alone",
+                                         "proportion of people who are Native Hawaiian and Other Pacific Islander alone",
+                                         "proportion of people who are some other race alone",
+                                         "proportion of people who are two or more races",
+                                         "proportion of people 25 and older whose highest education-level is high school",
+                                         "proportion of people 25 and older whose highest education-level is a GED",
+                                         "proportion of people 25 and older whose highest education-level is some, but less than 1 year of college",
+                                         "proportion of people 25 and older whose highest education-level is greater than 1 year of college but no degree",
+                                         "proportion of people 25 and older whose highest education-level is an Associates degree",
+                                         "proportion of people 25 and older whose highest education-level is a Bachelors degree",
+                                         "proportion of people 25 and older whose highest education-level is a Masters degree",
+                                         "proportion of people 25 and older whose highest education-level is a Professional degree",
+                                         "proportion of people 25 and older whose highest education-level is a Doctoral degree",
+                                         "proportion of people 25 and older living in poverty, defined by the Census Bureau as having an income below the poverty threshold for their family size."),
+                         Type = map_chr(census, .f = function(x){typeof(x)[1]}),
+                         Class = map_chr(census, .f = function(x){class(x)[1]}))
+
+```
+```{r}
+dataDictionary %>% flextable::flextable()
+```
+
+
+```{r}
+variables <- list(census,county_census,state_census,gun_violence,get_county_or_city,get_domain)
+dataDictionary <- tibble(Variable = c('census',"county_census",'state_census','gun_violence','get_county_or_city','get_domain'),
+                         Description = c("Tibble containing state and county census information",
+                                         "Tibble containing countywide census information only",
+                                         "A tibble statewide census information only",
+                                         "A tibble containing gun violence data from 2013-2018 to merge with census data",
+                                         "A function to retrieve county/parish/city information from address_full column in gun_violence",
+                                         "A function to retrieve domain/subdomain of websites reporting gun violence"),
+                         Type=map_chr(variables,typeof),
+Class=map_chr(variables,.f=function(x){class(x)[1]}))
+dataDictionary %>% flextable::flextable()
+```
+Other variables are derivatives of these main variables. The census data was complete for the most part except for some missingness in the "prop_" variables which did not affect the analysis significantly. The `address_full` missed 7935 addresses which caused NA's in the `county` column when obtaining county information and consequently affected the merge.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
